@@ -1,11 +1,12 @@
 #define NDIS61 
-#include "ioctl.h"
 #include <ntddk.h>
 #pragma warning(push)
 #pragma warning(disable:4201)       // unnamed struct/union
 #pragma warning(disable:4995)
+
 #include <fwpsk.h>
 #pragma warning(pop)
+#include "ioctl.h"
 #include <ndis.h>
 #include <fwpmk.h>
 #include <limits.h>
@@ -18,6 +19,7 @@
 #define bool BOOLEAN
 #define true TRUE 
 #define false FALSE
+
 #define DEVICE_NAME L"\\Device\\WFP_TEST"
 #define DEVICE_DOSNAME L"\\DosDevices\\WFP_TEST"
 #define kmalloc(_s) ExAllocatePoolWithTag(NonPagedPool, _s, 'SYSQ')
@@ -41,9 +43,64 @@ HANDLE	gInjectHandle = 0;
 UINT32	gAleConnectCalloutId = 0;
 //FilterId
 UINT64	gAleConnectFilterId = 0;
-
+//资源锁
+ERESOURCE g_Eresource;
 LIST_ENTRY gPath_list;
 //内核分发函数
+BOOLEAN IsMyFilterPath(wchar_t *PatH)
+{
+	LIST_ENTRY* p = NULL;
+
+	for (p = gPath_list.Flink; p != &gPath_list; p = p->Flink)
+	{
+		PRULENODE my_node = CONTAINING_RECORD(p, RULENODE, list_Entry);
+		if (!wcscmp(PatH,my_node->path))
+		{
+			return TRUE;
+		}
+
+	}
+
+	return FALSE;
+}
+NTSTATUS InsertRuleList( wchar_t *Path,int size)
+{
+	PRULENODE my_Rule = (PRULENODE)ExAllocatePoolWithTag(
+		NonPagedPool, sizeof(RULENODE), 'lwlz');
+	if (NULL == my_Rule)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	wcscpy_s(my_Rule->path, size, Path);
+	
+	ExAcquireResourceExclusiveLite(&g_Eresource, TRUE);
+	InsertHeadList(&gPath_list, (PLIST_ENTRY)& my_Rule->list_Entry);
+	ExReleaseResourceLite(&g_Eresource);
+	return STATUS_SUCCESS;
+
+};
+
+BOOLEAN RemoveRuleList(wchar_t* Path)
+{
+	LIST_ENTRY* p = NULL;
+	for (p = gPath_list.Flink; p != &gPath_list; p = p->Flink)
+	{
+		PRULENODE my_node = CONTAINING_RECORD(p, RULENODE, list_Entry);
+		if (!wcscmp(my_node->path, Path))
+		{
+
+			ExAcquireResourceExclusiveLite(&g_Eresource, TRUE);
+			BOOLEAN result = RemoveEntryList(p);
+			ExReleaseResourceLite(&g_Eresource);			
+			ExFreePool(my_node);
+			DbgPrint("RemoveList Success \n");
+			return result;
+		}
+
+	}
+	return FALSE;
+}
 
 NTSTATUS DispatchCommon(PDEVICE_OBJECT pObject, PIRP pIrp) {
 
@@ -190,7 +247,7 @@ void NTAPI WallALEConnectClassify
 		ProtocolName);
 	kfree(ProtocolName);
 	//在这里进行路径的判断，如果是我们拒绝的进程就进行拒绝操作，否则就放行
-	classifyOut->actionType = FWP_ACTION_PERMIT;//允许连接
+	
 	//禁止IE联网（设置“行动类型”为FWP_ACTION_BLOCK）
 	// if(wcsstr((PWCHAR)inMetaValues->processPath->data,L"iexplore.exe"))
 	// {
@@ -198,6 +255,16 @@ void NTAPI WallALEConnectClassify
 	// classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
 	// classifyOut->flags |= FWPS_CLASSIFY_OUT_FLAG_ABSORB;
 	// }
+	if (IsMyFilterPath((PWCHAR)inMetaValues->processPath->data))
+	{
+		classifyOut->actionType = FWP_ACTION_BLOCK;
+		classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
+		classifyOut->flags |= FWPS_CLASSIFY_OUT_FLAG_ABSORB;
+	}
+	else
+	{
+		classifyOut->actionType = FWP_ACTION_PERMIT;//允许连接
+	}
 	return;
 }
 
@@ -347,6 +414,7 @@ VOID DriverUnload(PDRIVER_OBJECT driverObject)
 	NTSTATUS status;
 	UNICODE_STRING  deviceDosName = { 0 };
 	status = WallUnRegisterCallouts();
+
 	if (!NT_SUCCESS(status))
 	{
 		DbgPrint("[WFP_TEST]WallUnRegisterCallouts failed!\n");
@@ -358,6 +426,15 @@ VOID DriverUnload(PDRIVER_OBJECT driverObject)
 	{
 		IoDeleteDevice(gDevObj);
 		gDevObj = NULL;
+	}
+	while (!IsListEmpty(&gPath_list))
+	{
+		//从尾部删除一个元素
+		PLIST_ENTRY pEntry = RemoveTailList(&gPath_list); //返回删除结构中ListEntry的位置
+		PRULENODE pData = CONTAINING_RECORD(pEntry,
+			RULENODE,
+			list_Entry);
+		ExFreePool(pData);
 	}
 	DbgPrint("[WFP_TEST] unloaded!\n");
 }
@@ -391,7 +468,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING registryPath)
 		return STATUS_UNSUCCESSFUL;
 	}
 	//初始化列表
-	//InitializeListHead(&gPath_list);
+	InitializeListHead(&gPath_list);
+	//初始化资源锁
+	ExInitializeResourceLite(&g_Eresource);
 	//初始化驱动中的分发函数
 	for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION + 1; i++)
 	{
