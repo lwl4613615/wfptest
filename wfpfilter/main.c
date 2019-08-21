@@ -44,7 +44,8 @@ UINT32	gAleConnectCalloutId = 0;
 //FilterId
 UINT64	gAleConnectFilterId = 0;
 //资源锁
-ERESOURCE g_Eresource;
+KSPIN_LOCK  my_Spin_Lock;
+
 LIST_ENTRY gPath_list;
 //内核分发函数
 BOOLEAN IsMyFilterPath(wchar_t *PatH)
@@ -65,6 +66,7 @@ BOOLEAN IsMyFilterPath(wchar_t *PatH)
 }
 NTSTATUS InsertRuleList( wchar_t *Path,int size)
 {
+	KIRQL irql;
 	PRULENODE my_Rule = (PRULENODE)ExAllocatePoolWithTag(
 		NonPagedPool, sizeof(RULENODE), 'lwlz');
 	if (NULL == my_Rule)
@@ -74,25 +76,27 @@ NTSTATUS InsertRuleList( wchar_t *Path,int size)
 
 	wcscpy_s(my_Rule->path, size, Path);
 	
-	ExAcquireResourceExclusiveLite(&g_Eresource, TRUE);
+	KeAcquireSpinLock(&my_Spin_Lock, &irql);
 	InsertHeadList(&gPath_list, (PLIST_ENTRY)& my_Rule->list_Entry);
-	ExReleaseResourceLite(&g_Eresource);
+	KeReleaseSpinLock(&my_Spin_Lock, irql);
 	return STATUS_SUCCESS;
 
 };
 
 BOOLEAN RemoveRuleList(wchar_t* Path)
 {
+	KIRQL irql;
 	LIST_ENTRY* p = NULL;
 	for (p = gPath_list.Flink; p != &gPath_list; p = p->Flink)
 	{
 		PRULENODE my_node = CONTAINING_RECORD(p, RULENODE, list_Entry);
 		if (!wcscmp(my_node->path, Path))
 		{
+			
 
-			ExAcquireResourceExclusiveLite(&g_Eresource, TRUE);
+			KeAcquireSpinLock(&my_Spin_Lock, &irql);
 			BOOLEAN result = RemoveEntryList(p);
-			ExReleaseResourceLite(&g_Eresource);			
+			KeReleaseSpinLock(&my_Spin_Lock, irql);
 			ExFreePool(my_node);
 			DbgPrint("RemoveList Success \n");
 			return result;
@@ -414,7 +418,15 @@ VOID DriverUnload(PDRIVER_OBJECT driverObject)
 	NTSTATUS status;
 	UNICODE_STRING  deviceDosName = { 0 };
 	status = WallUnRegisterCallouts();
-
+	while (!IsListEmpty(&gPath_list))
+	{
+		//从尾部删除一个元素
+		PLIST_ENTRY pEntry = RemoveTailList(&gPath_list); //返回删除结构中ListEntry的位置
+		PRULENODE pData = CONTAINING_RECORD(pEntry,
+			RULENODE,
+			list_Entry);
+		ExFreePool(pData);
+	}
 	if (!NT_SUCCESS(status))
 	{
 		DbgPrint("[WFP_TEST]WallUnRegisterCallouts failed!\n");
@@ -427,15 +439,7 @@ VOID DriverUnload(PDRIVER_OBJECT driverObject)
 		IoDeleteDevice(gDevObj);
 		gDevObj = NULL;
 	}
-	while (!IsListEmpty(&gPath_list))
-	{
-		//从尾部删除一个元素
-		PLIST_ENTRY pEntry = RemoveTailList(&gPath_list); //返回删除结构中ListEntry的位置
-		PRULENODE pData = CONTAINING_RECORD(pEntry,
-			RULENODE,
-			list_Entry);
-		ExFreePool(pData);
-	}
+	
 	DbgPrint("[WFP_TEST] unloaded!\n");
 }
 
@@ -470,7 +474,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING registryPath)
 	//初始化列表
 	InitializeListHead(&gPath_list);
 	//初始化资源锁
-	ExInitializeResourceLite(&g_Eresource);
+	KeInitializeSpinLock(&my_Spin_Lock);
 	//初始化驱动中的分发函数
 	for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION + 1; i++)
 	{
