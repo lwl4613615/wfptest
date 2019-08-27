@@ -22,7 +22,7 @@
 
 #define DEVICE_NAME L"\\Device\\WFP_TEST"
 #define DEVICE_DOSNAME L"\\DosDevices\\WFP_TEST"
-#define kmalloc(_s) ExAllocatePoolWithTag(NonPagedPool, _s, 'SYSQ')
+#define kmalloc(_s) ExAllocatePoolWithTag(NonPagedPoolNx, _s, 'SYSQ')
 #define kfree(_p) ExFreePool(_p)
 
 
@@ -55,7 +55,13 @@ BOOLEAN IsMyFilterPath(wchar_t *PatH)
 	for (p = gPath_list.Flink; p != &gPath_list; p = p->Flink)
 	{
 		PRULENODE my_node = CONTAINING_RECORD(p, RULENODE, list_Entry);
-		if (!wcscmp(PatH,my_node->path))
+		DbgPrint("my_node: %ws, pram: %ws \n", my_node->path, PatH);
+		UNICODE_STRING src;
+		UNICODE_STRING dst;
+		RtlInitUnicodeString(&src, my_node->path);
+		RtlInitUnicodeString(&dst, PatH);
+
+		if (RtlEqualUnicodeString(&src,&dst,TRUE))
 		{
 			return TRUE;
 		}
@@ -89,11 +95,13 @@ BOOLEAN RemoveRuleList(wchar_t* Path)
 	LIST_ENTRY* p = NULL;
 	for (p = gPath_list.Flink; p != &gPath_list; p = p->Flink)
 	{
-		PRULENODE my_node = CONTAINING_RECORD(p, RULENODE, list_Entry);
-		if (!wcscmp(my_node->path, Path))
+		PRULENODE my_node = CONTAINING_RECORD(p, RULENODE, list_Entry);		
+		UNICODE_STRING src;
+		UNICODE_STRING dst;
+		RtlInitUnicodeString(&src, my_node->path);
+		RtlInitUnicodeString(&dst, Path);
+		if (RtlEqualUnicodeString(&src, &dst, TRUE))
 		{
-			
-
 			KeAcquireSpinLock(&my_Spin_Lock, &irql);
 			BOOLEAN result = RemoveEntryList(p);
 			KeReleaseSpinLock(&my_Spin_Lock, irql);
@@ -101,7 +109,6 @@ BOOLEAN RemoveRuleList(wchar_t* Path)
 			DbgPrint("RemoveList Success \n");
 			return result;
 		}
-
 	}
 	return FALSE;
 }
@@ -145,9 +152,14 @@ NTSTATUS DispatchIoctrl(PDEVICE_OBJECT pObject, PIRP pIrp) {
 	switch (uControlCode)
 	{
 	case IOCTL_ADD_PATH:
-		DbgPrint("ADD PATH IoControl\n");
+		DbgPrint("ADD PATH IoControl\n");		
+		DbgPrint("%ws \n", pInputBuff);
+		InsertRuleList((wchar_t*)pInputBuff, uInputLength);
 		break; 
 	case IOCTL_DELETE_PATH:
+		
+		DbgPrint("%ws \n", pInputBuff);
+		RemoveRuleList((wchar_t*)pInputBuff);
 		DbgPrint("DELETE PATH IoControl \n");
 		break;
 	default:
@@ -194,6 +206,10 @@ VOID NTAPI WallFlowDeleteFn
 char* ProtocolIdToName(UINT16 id)
 {
 	char* ProtocolName = kmalloc(16);
+	if (ProtocolName==NULL)
+	{
+		return NULL;
+	}
 	switch (id)	//http://www.ietf.org/rfc/rfc1700.txt
 	{
 	case 1:
@@ -235,21 +251,23 @@ void NTAPI WallALEConnectClassify
 	UNREFERENCED_PARAMETER(filter);
 	UNREFERENCED_PARAMETER(classifyContext);
 	UNREFERENCED_PARAMETER(layerData);
-	char* ProtocolName = NULL;
+	//char* ProtocolName = NULL;
 	DWORD LocalIp, RemoteIP;
 	LocalIp = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_LOCAL_ADDRESS].value.uint32;
 	RemoteIP = inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_REMOTE_ADDRESS].value.uint32;
-	ProtocolName = ProtocolIdToName(inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_PROTOCOL].value.uint16);
-	DbgPrint("[WFP]IRQL=%d;PID=%ld;Path=%S;Local=%u.%u.%u.%u:%d;Remote=%u.%u.%u.%u:%d;Protocol=%s\n",
-		(USHORT)KeGetCurrentIrql(),
-		(DWORD)(inMetaValues->processId),
-		(PWCHAR)inMetaValues->processPath->data,	//NULL,//
-		(LocalIp >> 24) & 0xFF, (LocalIp >> 16) & 0xFF, (LocalIp >> 8) & 0xFF, LocalIp & 0xFF,
-		inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_LOCAL_PORT].value.uint16,
-		(RemoteIP >> 24) & 0xFF, (RemoteIP >> 16) & 0xFF, (RemoteIP >> 8) & 0xFF, RemoteIP & 0xFF,
-		inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_REMOTE_PORT].value.uint16,
-		ProtocolName);
-	kfree(ProtocolName);
+	//ProtocolName = ProtocolIdToName(inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_PROTOCOL].value.uint16);
+	
+
+		DbgPrint("[WFP]IRQL=%d;PID=%ld;Path=%S;Local=%u.%u.%u.%u:%d;Remote=%u.%u.%u.%u:%d;Protocol=\n",
+			(USHORT)KeGetCurrentIrql(),
+			(DWORD)(inMetaValues->processId),
+			(PWCHAR)inMetaValues->processPath->data,	//NULL,//
+			(LocalIp >> 24) & 0xFF, (LocalIp >> 16) & 0xFF, (LocalIp >> 8) & 0xFF, LocalIp & 0xFF,
+			inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_LOCAL_PORT].value.uint16,
+			(RemoteIP >> 24) & 0xFF, (RemoteIP >> 16) & 0xFF, (RemoteIP >> 8) & 0xFF, RemoteIP & 0xFF,
+			inFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_CONNECT_V4_IP_REMOTE_PORT].value.uint16);
+		//kfree(ProtocolName);
+	
 	//在这里进行路径的判断，如果是我们拒绝的进程就进行拒绝操作，否则就放行
 	
 	//禁止IE联网（设置“行动类型”为FWP_ACTION_BLOCK）
@@ -450,6 +468,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING registryPath)
 	UNICODE_STRING  deviceDosName = { 0 };
 	NTSTATUS status = STATUS_SUCCESS;
 	driverObject->DriverUnload = DriverUnload;
+	DbgBreakPoint();
 	RtlInitUnicodeString(&deviceName, DEVICE_NAME);
 	status = IoCreateDevice(driverObject,
 		0,
